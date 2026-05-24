@@ -1,102 +1,123 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createServerClient } from '@/lib/supabase';
+import { CreateReservationSchema } from '@/lib/schemas';
+import { acquireLock, releaseLock, getCachedResponse, setCachedResponse } from '@/lib/redis';
 
 export async function POST(req: NextRequest) {
   const supabase = createServerClient();
   const idempotencyKey = req.headers.get('Idempotency-Key');
-  const body = await req.json();
-  const { session_id, product_id, warehouse_id, quantity } = body;
-
-  if (!session_id || !product_id || !warehouse_id || !quantity) {
-    return NextResponse.json({ error: 'missing_fields' }, { status: 400 });
+  let body;
+  try {
+    body = await req.json();
+  } catch {
+    return NextResponse.json({ error: 'invalid_json' }, { status: 400 });
   }
 
-  if (quantity < 1 || quantity > 10) {
-    return NextResponse.json({ error: 'invalid_quantity' }, { status: 400 });
+  // 1. Validate request payload with Zod
+  const validation = CreateReservationSchema.safeParse(body);
+  if (!validation.success) {
+    return NextResponse.json({
+      error: 'validation_error',
+      details: validation.error.format()
+    }, { status: 400 });
   }
 
+  const { session_id, product_id, warehouse_id, quantity } = validation.data;
+
+  // 2. Check Idempotency Key in Redis
   if (idempotencyKey) {
-    const { data: cached } = await supabase
-      .from('idempotency_keys')
-      .select('response')
-      .eq('key', idempotencyKey)
+    const cached = await getCachedResponse(idempotencyKey);
+    if (cached) {
+      return NextResponse.json(cached.body, { status: cached.status });
+    }
+  }
+
+  // 3. Acquire Distributed Lock at Product/Warehouse SKU level in Redis
+  const lockKey = `${product_id}:${warehouse_id}`;
+  const acquired = await acquireLock(lockKey, 5000);
+  if (!acquired) {
+    return NextResponse.json({
+      error: 'concurrent_request_retry',
+      message: 'System is busy processing holds for this product. Please retry in a moment.'
+    }, { status: 429 });
+  }
+
+  try {
+    await supabase.rpc('expire_reservations');
+
+    // Enforce single active reservation per session
+    const { data: existingActive, error: activeCheckError } = await supabase
+      .from('reservations')
+      .select('id')
+      .eq('session_id', session_id)
+      .eq('status', 'active')
       .maybeSingle();
 
-    if (cached) {
-      return NextResponse.json(cached.response.body, { status: cached.response.status });
+    if (activeCheckError) {
+      const responseBody = { error: activeCheckError.message };
+      const status = 500;
+      if (idempotencyKey) {
+        await setCachedResponse(idempotencyKey, { body: responseBody, status }, 86400);
+      }
+      return NextResponse.json(responseBody, { status });
     }
-  }
 
-  await supabase.rpc('expire_reservations');
-
-  // Enforce single active reservation per session
-  const { data: existingActive, error: activeCheckError } = await supabase
-    .from('reservations')
-    .select('id')
-    .eq('session_id', session_id)
-    .eq('status', 'active')
-    .maybeSingle();
-
-  if (activeCheckError) {
-    return NextResponse.json({ error: activeCheckError.message }, { status: 500 });
-  }
-
-  if (existingActive) {
-    const errCode = 'active_reservation_exists';
-    const status = 400;
-    if (idempotencyKey) {
-      await supabase.from('idempotency_keys').insert({
-        key: idempotencyKey,
-        response: { body: { error: errCode }, status }
-      });
+    if (existingActive) {
+      const errCode = 'active_reservation_exists';
+      const status = 400;
+      const responseBody = { error: errCode };
+      if (idempotencyKey) {
+        await setCachedResponse(idempotencyKey, { body: responseBody, status }, 86400);
+      }
+      return NextResponse.json(responseBody, { status });
     }
-    return NextResponse.json({ error: errCode }, { status });
-  }
 
-  const { data, error } = await supabase.rpc('place_reservation', {
-    p_session_id: session_id,
-    p_product_id: product_id,
-    p_warehouse_id: warehouse_id,
-    p_quantity: quantity,
-  });
-
-  if (error) {
-    const msg = error.message ?? '';
-    let status = 500;
-    let errCode = msg;
-    if (msg.includes('insufficient_stock')) {
-      errCode = 'insufficient_stock';
-      status = 409;
-    } else if (msg.includes('inventory_not_found')) {
-      errCode = 'inventory_not_found';
-      status = 404;
-    }
-    
-    if (idempotencyKey) {
-      await supabase.from('idempotency_keys').insert({
-        key: idempotencyKey,
-        response: { body: { error: errCode }, status }
-      });
-    }
-    return NextResponse.json({ error: errCode }, { status });
-  }
-
-  const { data: reservation } = await supabase
-    .from('reservations')
-    .select('*')
-    .eq('id', data as string)
-    .maybeSingle();
-
-  const responseBody = { reservation_id: data, reservation };
-  if (idempotencyKey) {
-    await supabase.from('idempotency_keys').insert({
-      key: idempotencyKey,
-      response: { body: responseBody, status: 201 }
+    const { data, error } = await supabase.rpc('place_reservation', {
+      p_session_id: session_id,
+      p_product_id: product_id,
+      p_warehouse_id: warehouse_id,
+      p_quantity: quantity,
     });
-  }
 
-  return NextResponse.json(responseBody, { status: 201 });
+    if (error) {
+      const msg = error.message ?? '';
+      let status = 500;
+      let errCode = msg;
+      if (msg.includes('insufficient_stock')) {
+        errCode = 'insufficient_stock';
+        status = 409;
+      } else if (msg.includes('inventory_not_found')) {
+        errCode = 'inventory_not_found';
+        status = 404;
+      }
+      
+      const responseBody = { error: errCode };
+      if (idempotencyKey) {
+        await setCachedResponse(idempotencyKey, { body: responseBody, status }, 86400);
+      }
+      return NextResponse.json(responseBody, { status });
+    }
+
+    const { data: reservation } = await supabase
+      .from('reservations')
+      .select('*')
+      .eq('id', data as string)
+      .maybeSingle();
+
+    const responseBody = { reservation_id: data, reservation };
+    const status = 201;
+
+    if (idempotencyKey) {
+      await setCachedResponse(idempotencyKey, { body: responseBody, status }, 86400);
+    }
+
+    return NextResponse.json(responseBody, { status });
+  } finally {
+    // 4. Always release distributed lock
+    await releaseLock(lockKey);
+  }
 }
+
 
 export async function GET(req: NextRequest) {
   const supabase = createServerClient();
