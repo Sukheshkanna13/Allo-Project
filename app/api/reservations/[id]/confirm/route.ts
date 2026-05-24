@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createServerClient } from '@/lib/supabase';
 import { sendOrderConfirmationEmail } from '@/lib/email';
+import { ConfirmReservationSchema } from '@/lib/schemas';
+import { getCachedResponse, setCachedResponse } from '@/lib/redis';
 
 interface ReservationWithProduct {
   id: string;
@@ -25,23 +27,33 @@ export async function POST(
   const idempotencyKey = req.headers.get('Idempotency-Key');
   const reservation_id = params.id;
   
-  const body = await req.json();
-  const { session_id, customer_email } = body;
-
-  if (!reservation_id || !session_id || !customer_email) {
-    return NextResponse.json({ error: 'missing_fields' }, { status: 400 });
+  let body;
+  try {
+    body = await req.json();
+  } catch {
+    return NextResponse.json({ error: 'invalid_json' }, { status: 400 });
   }
 
-  // Idempotency check
-  if (idempotencyKey) {
-    const { data: cached } = await supabase
-      .from('idempotency_keys')
-      .select('response')
-      .eq('key', idempotencyKey)
-      .maybeSingle();
+  // 1. Zod validation for confirmation payload
+  const validation = ConfirmReservationSchema.safeParse(body);
+  if (!validation.success) {
+    return NextResponse.json({
+      error: 'validation_error',
+      details: validation.error.format()
+    }, { status: 400 });
+  }
 
+  const { session_id, customer_email } = validation.data;
+
+  if (!reservation_id) {
+    return NextResponse.json({ error: 'missing_reservation_id' }, { status: 400 });
+  }
+
+  // 2. Check Idempotency Key in Redis
+  if (idempotencyKey) {
+    const cached = await getCachedResponse(idempotencyKey);
     if (cached) {
-      return NextResponse.json(cached.response.body, { status: cached.response.status });
+      return NextResponse.json(cached.body, { status: cached.status });
     }
   }
 
@@ -79,9 +91,19 @@ export async function POST(
 
   if (releaseError) {
     if (releaseError.message.includes('reservation_expired')) {
-      return NextResponse.json({ error: 'reservation_expired' }, { status: 410 });
+      const responseBody = { error: 'reservation_expired' };
+      const status = 410;
+      if (idempotencyKey) {
+        await setCachedResponse(idempotencyKey, { body: responseBody, status }, 86400);
+      }
+      return NextResponse.json(responseBody, { status });
     }
-    return NextResponse.json({ error: releaseError.message }, { status: 500 });
+    const responseBody = { error: releaseError.message };
+    const status = 500;
+    if (idempotencyKey) {
+      await setCachedResponse(idempotencyKey, { body: responseBody, status }, 86400);
+    }
+    return NextResponse.json(responseBody, { status });
   }
 
   const { data: order, error: orderError } = await supabase
@@ -100,7 +122,12 @@ export async function POST(
     .maybeSingle();
 
   if (orderError) {
-    return NextResponse.json({ error: orderError.message }, { status: 500 });
+    const responseBody = { error: orderError.message };
+    const status = 500;
+    if (idempotencyKey) {
+      await setCachedResponse(idempotencyKey, { body: responseBody, status }, 86400);
+    }
+    return NextResponse.json(responseBody, { status });
   }
 
   // Fire email asynchronously
@@ -116,10 +143,7 @@ export async function POST(
   const responseStatus = 201;
 
   if (idempotencyKey) {
-    await supabase.from('idempotency_keys').insert({
-      key: idempotencyKey,
-      response: { body: responseBody, status: responseStatus }
-    });
+    await setCachedResponse(idempotencyKey, { body: responseBody, status: responseStatus }, 86400);
   }
 
   return NextResponse.json(responseBody, { status: responseStatus });
