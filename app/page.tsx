@@ -184,6 +184,7 @@ function ProductCard({ product, onReserved, index }: ProductCardProps) {
         const msgs: Record<string, string> = {
           insufficient_stock: 'Not enough stock at this warehouse.',
           inventory_not_found: 'Inventory record not found.',
+          active_reservation_exists: 'You already have an active reservation hold. Please complete checkout or cancel it first.',
         };
         setError(msgs[data.error] ?? 'Something went wrong.');
         return;
@@ -349,8 +350,28 @@ export default function StorefrontPage() {
     }
   };
 
+  const checkActiveReservation = async () => {
+    try {
+      const sessionId = getSessionId();
+      if (!sessionId) return;
+      const res = await fetch(`/api/reservations?session_id=${sessionId}`);
+      if (res.ok) {
+        const data = await res.json();
+        const active = data.find(
+          (r: any) => r.status === 'active' && new Date(r.expires_at).getTime() > Date.now()
+        );
+        if (active) {
+          setActiveReservation({ id: active.id, expiresAt: active.expires_at });
+        }
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
   useEffect(() => {
     fetchProducts();
+    checkActiveReservation();
     const t = setInterval(fetchProducts, 30_000);
     return () => clearInterval(t);
   }, []);

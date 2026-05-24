@@ -13,6 +13,7 @@ import {
   Loader2,
   CreditCard,
   Mail,
+  X,
 } from 'lucide-react';
 
 const SESSION_KEY = 'allo_session_id';
@@ -50,7 +51,7 @@ interface ReservationDetail {
   };
 }
 
-type PageState = 'loading' | 'active' | 'expired' | 'confirmed' | 'error' | 'not_found';
+type PageState = 'loading' | 'active' | 'expired' | 'confirmed' | 'error' | 'not_found' | 'cancelled';
 
 export default function CheckoutPage({
   params,
@@ -159,6 +160,27 @@ export default function CheckoutPage({
     }
   };
 
+  const handleCancel = async () => {
+    setSubmitting(true);
+    setFormError('');
+    try {
+      const res = await fetch(`/api/reservations/${params.reservationId}/release`, {
+        method: 'POST',
+      });
+
+      if (!res.ok) {
+        setFormError('Failed to cancel the reservation.');
+        return;
+      }
+
+      setPageState('cancelled');
+    } catch {
+      setFormError('Network error while cancelling.');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
   const mins = Math.floor(secondsLeft / 60);
   const secs = secondsLeft % 60;
   const isUrgent = secondsLeft < 120 && pageState === 'active';
@@ -209,6 +231,28 @@ export default function CheckoutPage({
           <h1 className="text-2xl font-semibold text-stone-900 mb-2">Hold expired</h1>
           <p className="text-stone-500 text-sm mb-8">
             Your 10-minute reservation window has passed. The stock was released back to inventory.
+          </p>
+          <button
+            onClick={() => router.push('/')}
+            className="bg-stone-900 text-white px-6 py-2.5 rounded-xl text-sm font-medium hover:bg-stone-700 transition-colors"
+          >
+            Browse products
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (pageState === 'cancelled') {
+    return (
+      <div className="min-h-screen bg-stone-50 flex items-center justify-center px-4">
+        <div className="text-center max-w-sm animate-scale-in">
+          <div className="w-16 h-16 bg-stone-100 rounded-full flex items-center justify-center mx-auto mb-5">
+            <X className="w-8 h-8 text-stone-500" />
+          </div>
+          <h1 className="text-2xl font-semibold text-stone-900 mb-2">Reservation cancelled</h1>
+          <p className="text-stone-500 text-sm mb-8">
+            You have cancelled your reservation. The stock has been released back to inventory.
           </p>
           <button
             onClick={() => router.push('/')}
@@ -451,23 +495,35 @@ export default function CheckoutPage({
                   </div>
                 )}
 
-                <button
-                  type="submit"
-                  disabled={submitting}
-                  className="w-full bg-stone-900 text-white font-medium py-3.5 px-6 rounded-xl hover:bg-stone-700 active:scale-[0.99] transition-all disabled:opacity-60 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-                >
-                  {submitting ? (
-                    <>
-                      <Loader2 className="w-4 h-4 animate-spin" />
-                      Processing…
-                    </>
-                  ) : (
-                    <>
-                      <ShieldCheck className="w-4 h-4" />
-                      Confirm Order · ${total.toFixed(2)}
-                    </>
-                  )}
-                </button>
+                <div className="flex flex-col gap-3">
+                  <button
+                    type="submit"
+                    disabled={submitting}
+                    className="w-full bg-stone-900 text-white font-medium py-3.5 px-6 rounded-xl hover:bg-stone-700 active:scale-[0.99] transition-all disabled:opacity-60 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                  >
+                    {submitting ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        Processing…
+                      </>
+                    ) : (
+                      <>
+                        <ShieldCheck className="w-4 h-4" />
+                        Confirm Order · ${total.toFixed(2)}
+                      </>
+                    )}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleCancel}
+                    disabled={submitting}
+                    className="w-full bg-white hover:bg-stone-50 text-stone-600 border border-stone-200 font-medium py-3 px-6 rounded-xl active:scale-[0.99] transition-all disabled:opacity-60 flex items-center justify-center gap-2"
+                  >
+                    <X className="w-4 h-4" />
+                    Cancel Reservation
+                  </button>
+                </div>
 
                 <p className="text-center text-xs text-stone-400">
                   By confirming, you agree to our terms. Demo payment simulation.

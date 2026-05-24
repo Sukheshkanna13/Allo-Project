@@ -29,6 +29,30 @@ export async function POST(req: NextRequest) {
 
   await supabase.rpc('expire_reservations');
 
+  // Enforce single active reservation per session
+  const { data: existingActive, error: activeCheckError } = await supabase
+    .from('reservations')
+    .select('id')
+    .eq('session_id', session_id)
+    .eq('status', 'active')
+    .maybeSingle();
+
+  if (activeCheckError) {
+    return NextResponse.json({ error: activeCheckError.message }, { status: 500 });
+  }
+
+  if (existingActive) {
+    const errCode = 'active_reservation_exists';
+    const status = 400;
+    if (idempotencyKey) {
+      await supabase.from('idempotency_keys').insert({
+        key: idempotencyKey,
+        response: { body: { error: errCode }, status }
+      });
+    }
+    return NextResponse.json({ error: errCode }, { status });
+  }
+
   const { data, error } = await supabase.rpc('place_reservation', {
     p_session_id: session_id,
     p_product_id: product_id,
