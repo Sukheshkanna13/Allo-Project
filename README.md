@@ -1,66 +1,48 @@
-# 🚀 Allo Health — Inventory & Reservation Platform
+# 🚀 Allo Health — High-Concurrency Inventory Reservation System
 
-A premium, high-concurrency **Inventory Reservation & Checkout System** built for multi-warehouse retail and D2C brands, satisfying all constraints of the Allo Health Take-Home Engineering Exercise.
-
----
-
-## 📸 Key Features & Architecture
-- **📦 Multi-Warehouse Stock Management**: Distinct tracking of physical inventory, total stock, and active reservations across multiple hubs (Mumbai, Delhi, Bangalore).
-- **🔒 Race-Condition-Free Reservation System**: Strict database-level row locking (`FOR UPDATE`) guarantees that under high concurrent load (e.g., thousands of checkout requests for the last physical item), exactly **one** shopper secures the hold while others receive a clean `409 Conflict`.
-- **✉️ Real-Time SMTP Email Receipts**: Gmail/SMTP-driven HTML email confirmations sent automatically upon order completion.
-- **💾 Full Idempotency Support (Bonus)**: Both the reservation creation and order confirmation endpoints support `Idempotency-Key` headers, guarding against network retries and duplicate payments.
-- **⏲️ Live Countdown Timer & State Transitions**: A highly responsive, visual, Apple-inspired UI that includes a 10-minute hold progress bar, live countdown, and immediate state sync without page refreshes.
-- **❌ Early Release**: Active "Cancel Reservation" flow that lets shoppers release holds early to immediately free up stock for other buyers.
-- **🚫 Single Active Reservation Constraint**: To prevent cart complexity and orphaned database locks, each user session is limited to exactly one active reservation. Attempting to reserve another SKU before checking out or cancelling the current hold triggers a descriptive error alert, and the active reservation details remain persistent across browser refreshes.
+A production-grade, transaction-safe **Inventory Reservation & Checkout System** built for multi-warehouse retail and D2C brands. This project solves the critical checkout race condition where multiple concurrent shoppers attempt to book the last physical unit of a SKU.
 
 ---
 
-## 🛠️ Tech Stack & Services
-1. **Frontend**: Next.js 14 (App Router) + TypeScript + Tailwind CSS + Lucide Icons.
-2. **Database**: Managed Supabase PostgreSQL Instance (handles relational structures and transaction safety).
-3. **Emailing**: Nodemailer with SMTP transporter config.
-4. **Concurrency Layer**: PL/pgSQL database stored procedures (`SECURITY DEFINER` and atomic `FOR UPDATE` transactions).
+## 📸 Core Architecture & Features
+
+- **📦 Multi-Warehouse Stock Allocation**: Tracks physical inventory counts (`total_qty`) and active temporary holds (`reserved_qty`) across three regional hubs (Mumbai, Delhi, Bangalore).
+- **🔒 Transactional Concurrency Protection**: Utilizing database-level serialized row locking (`SELECT ... FOR UPDATE`), ensuring exactly one concurrent checkout request succeeds during peak traffic, while others receive a clean `409 Conflict`.
+- **🚫 Single Active Reservation Constraint**: To prevent cart complexity, stock hoarding, and orphaned locks, shopper sessions are limited to exactly **one** active reservation hold at a time. The system restores and persists active banners across browser refreshes.
+- **💾 Database-Backed Idempotency (Bonus)**: Implements robust idempotency keys for both reservation placement and order confirmations, shielding the platform from network retries, double clicks, and duplicate payment side effects.
+- **✉️ Asynchronous SMTP Email Receipts**: Dynamically transmits beautifully structured HTML transaction receipts upon order confirmation via Nodemailer SMTP.
+- **⏲️ Real-Time Countdown Banners & Visual Transitions**: Features a 10-minute hold progress bar, live countdown, and immediate state updates (success, expiration, early cancellation) without page refreshes.
+- **❌ Early Release**: Allows shoppers to release holds early via a "Cancel Reservation" button, immediately returning reserved stock to the warehouse pool.
 
 ---
 
-## ⚙️ How to Run the App Locally
+## 🛠️ Technical Stack & Architectural Decisions
 
-### 1. Clone & Install Dependencies
-```bash
-git clone https://github.com/Sukheshkanna13/Allo-Project.git
-cd Allo-Project
-npm install
-```
+| Technology | Implementation Scope |
+| :--- | :--- |
+| **Next.js 14 (App Router)** | Framework for Serverless APIs, Edge routing, and visual layouts. |
+| **TypeScript** | Structured types (`ReservationDetail`, `PageState`) enforced end-to-end. |
+| **Supabase (PostgreSQL)** | Relational database, indexing, and transactional boundaries. |
+| **Tailwind CSS** | Premium custom UI (glassmorphism cards, skeleton animations, apple-style shadows). |
+| **Nodemailer** | SMTP transporter for transaction email dispatches. |
 
-### 2. Configure Environment Variables
-Create a `.env.local` file in the root directory:
-```env
-NEXT_PUBLIC_SUPABASE_URL=your_supabase_url
-NEXT_PUBLIC_SUPABASE_ANON_KEY=your_supabase_anon_key
-EMAIL_HOST_USER=your_gmail_address@gmail.com
-EMAIL_HOST_PASSWORD=your_app_specific_gmail_password
-```
+### 💡 Key Design & Engineering Trade-Offs
 
-### 3. Database Schema & Migration Setup
-The project database is managed through three SQL migration files located in `supabase/migrations/`:
-1. `20260524040407_create_inventory_reservation_system.sql`: Establishes the tables, relations, indexes, initial seed data (3 warehouses, 6 premium products, pre-allocated stock levels), and core PL/pgSQL procedures.
-2. `20260524050500_strict_confirm_and_idempotency.sql`: Creates the `idempotency_keys` table and rewrites the reservation release function to prevent expired holds from ever being confirmed.
-3. `20260524052800_fix_rpc_security.sql`: Declares procedures with `SECURITY DEFINER` privileges, bypassing direct table update restrictions under Row-Level Security (RLS) for anonymous clients.
+During design planning, several structural choices were made to optimize performance under high-concurrency, serverless edge environments:
 
-**To deploy them**:
-- Simply copy the scripts into your Supabase SQL editor and execute them sequentially (or run `supabase db push` if you have the Supabase CLI initialized).
+#### 1. Why Hosted Supabase Client is Preferred Over Prisma
+- **No Cold Start Latency**: Next.js Serverless Edge functions suffer heavy startup latency (cold starts) when loading Prisma's heavy Rust-compiled engine binaries. Supabase connects via direct HTTPS API queries, ensuring sub-second response times.
+- **Connection Pool Protection**: Traditional ORMs like Prisma open direct TCP connections, which quickly exhaust database connection limits under high serverless scaling. Supabase routes requests through an optimized connection pooler automatically.
 
-### 4. Launch the Development Server
-```bash
-npm run dev
-```
-Open [http://localhost:3000](http://localhost:3000) to view the storefront!
+#### 2. Why PostgreSQL Row-Level Locks are Used Over Redis (Distributed Locks)
+- **Preventing Dual-Write Out-of-Sync Bugs**: Implementing locks in Redis (like Upstash) paired with database writes in PostgreSQL creates a "dual-write" problem. If the server crashes or loses network connectivity *between* updating Redis and committing to PostgreSQL, the cache and database drift completely out of sync, leading to orphaned inventory locks.
+- **Single ACID Transaction Boundary**: By keeping the `FOR UPDATE` locks and `idempotency_keys` inside PostgreSQL, the entire reservation workflow runs within a **single ACID transaction**. If the write fails, the lock releases, and the transaction rolls back atomically.
 
 ---
 
-## 🔒 Concurrency Design & Race Condition Resolution
+## 🔒 Concurrency & Transaction Safety Design
 
-If two customers click "Reserve" simultaneously on the very last unit of a SKU, they trigger a concurrent race condition. We resolve this elegantly inside the database transaction:
+If two customers click "Reserve" simultaneously on the last available diagnostic kit, they trigger a concurrent race condition. We resolve this directly inside the database transaction:
 
 ```sql
 CREATE OR REPLACE FUNCTION place_reservation(
@@ -76,7 +58,7 @@ DECLARE
   v_inv            inventory%ROWTYPE;
   v_reservation_id uuid;
 BEGIN
-  -- 1. Lock the inventory row strictly for update
+  -- 1. Serialized Row Lock: Lock the inventory SKU for this specific warehouse exclusively
   SELECT * INTO v_inv
   FROM inventory
   WHERE product_id = p_product_id
@@ -87,12 +69,12 @@ BEGIN
     RAISE EXCEPTION 'inventory_not_found';
   END IF;
 
-  -- 2. Concurrency check
+  -- 2. Concurrency Safety Check
   IF (v_inv.total_qty - v_inv.reserved_qty) < p_quantity THEN
     RAISE EXCEPTION 'insufficient_stock';
   END IF;
 
-  -- 3. Atomically update inventory and log reservation
+  -- 3. Atomic Updates
   UPDATE inventory
   SET reserved_qty = reserved_qty + p_quantity,
       updated_at   = now()
@@ -108,42 +90,67 @@ $$;
 ```
 
 ### Why this is bulletproof:
-- `FOR UPDATE` serializes concurrent transactions requesting the same SKU at the same warehouse.
-- Transaction #2 is held in queue until Transaction #1 commits. When Transaction #2 resumes, it reads the updated `reserved_qty`, failing the subtraction condition and cleanly raising an `'insufficient_stock'` exception (`409 Conflict`), ensuring zero double-bookings.
+1. `FOR UPDATE` blocks Transaction #2 until Transaction #1 commits or rolls back.
+2. When Transaction #2 resumes, it reads the newly updated `reserved_qty`, failing the stock check, and cleanly returning an `insufficient_stock` error (`409 Conflict`), making double-bookings impossible.
+3. Decared as `SECURITY DEFINER` so Serverless Anon client routes can securely trigger transaction overrides bypassing standard direct Row-Level Security (RLS) tables policies.
 
 ---
 
 ## ⚡ Idempotency Implementation (Bonus)
 
-We implemented robust idempotency for both the **Reserve** and **Confirm** POST endpoints.
+To prevent duplicate charges or double holds under unstable network conditions, the Reserve and Confirm POST endpoints enforce standard `Idempotency-Key` tracking:
 
-1. **How it works**:
-   - The frontend generates a unique UUID (e.g. `crypto.randomUUID()`) and forwards it as the `Idempotency-Key` header with every checkout POST request.
-   - On the server, we inspect this header and query our `idempotency_keys` table.
-   - If a record is found, we instantly return the cached JSON body and HTTP response status code without executing any database modifications or sending duplicate emails.
-   - If no record exists, the server executes the transaction, stores the exact API output in the `idempotency_keys` table, and returns the response.
-2. **Safety**: This ensures network retries (e.g., when the customer's phone disconnects during a payment gateway redirect) never result in duplicate orders or double-deducted inventory.
-
----
-
-## ⏱️ Expiry Mechanism & Production Cleanup
-
-Expired holds are automatically returned to available inventory through a robust multi-layered strategy:
-
-1. **Lazy Cleanup on Request (Default)**:
-   Whenever any customer requests a new reservation (`POST /api/reservations`), the server runs `expire_reservations()` first. It finds active reservations where `expires_at < now()`, locks them using `FOR UPDATE SKIP LOCKED` to avoid blocking concurrent checkout actions, and releases the inventory immediately.
-2. **Active Production Cron**:
-   We created a cron-ready route: `GET /api/cleanup`. 
-   In production, you can trigger this endpoint on a recurring interval (e.g. every 1 minute) using a scheduler like:
-   - **Vercel Cron Jobs** (`vercel.json` scheduler)
-   - **Upstash QStash / Cron**
-   - **GitHub Actions** workflows
+1. **The Flow**:
+   - The React client generates a unique UUID (`crypto.randomUUID()`) and forwards it as the `Idempotency-Key` header with each POST query.
+   - On the server, we inspect this header and check our `idempotency_keys` table.
+   - If a record exists, the server immediately returns the cached JSON payload and HTTP response code without executing any database modifications or sending duplicate emails.
+   - If no record exists, the server executes the transaction, stores the exact API response in the table, and returns the response.
 
 ---
 
-## ⚖️ Trade-offs & Future Enhancements
+## ⏱️ Production Expiration & Cleanup Mechanism
 
-With more time in a production environment, we would prioritize:
-1. **Dedicated Cache for Idempotency**: Replace the postgres `idempotency_keys` table with an in-memory Redis cluster (e.g., Upstash) using an automatic Time-To-Live (TTL) of 24 hours to keep the main SQL storage slim.
-2. **Distributed Locks (Redlock)**: Utilize Redis distributed locking for microsecond-sensitive concurrent queries instead of relying entirely on heavy relational DB row locks, minimizing DB load.
-3. **Queue-driven Emailing**: Move email confirmations to a message queue (e.g., BullMQ or Amazon SQS) with automatic retry handling instead of running the nodemailer transporter asynchronously inside the HTTP handler.
+Active reservations are held for exactly 10 minutes. If the shopper fails to check out, holds are safely swept and inventory is restored through a multi-layered strategy:
+
+1. **Self-Healing Lazy Cleanup (Default)**:
+   Every time any customer attempts to make a new reservation (`POST /api/reservations`), the server automatically runs `expire_reservations()`. This runs a non-blocking `FOR UPDATE SKIP LOCKED` query to sweep and unlock expired records in the database, ensuring active traffic triggers immediate inventory recovery.
+2. **Hobby-Tier Complying Production Cron**:
+   We exposed a dedicated endpoint: `GET /api/cleanup`. 
+   To comply with **Vercel's free Hobby Tier limit** (which caps Cron Jobs at a maximum of **once per day**), we configured `vercel.json` to execute a safety sweep daily at midnight:
+   ```json
+   {
+     "crons": [
+       {
+         "path": "/api/cleanup",
+         "schedule": "0 0 * * *"
+       }
+     ]
+   }
+   ```
+   *Note: In a premium Vercel Pro environment, this schedule can simply be set to run every minute (`* * * * *`) or 5 minutes (`*/5 * * * *`).*
+
+---
+
+## ⚙️ Local Setup Guide
+
+### 1. Configure Local Variables
+Create a `.env.local` file in the root directory:
+```env
+NEXT_PUBLIC_SUPABASE_URL=your_supabase_hosted_url
+NEXT_PUBLIC_SUPABASE_ANON_KEY=your_supabase_anon_key
+EMAIL_HOST_USER=your_gmail_sender@gmail.com
+EMAIL_HOST_PASSWORD=your_app_specific_gmail_password
+```
+
+### 2. Populate DB Migrations & Seeds
+Execute the SQL scripts found in `supabase/migrations/` sequentially in your Supabase SQL Editor:
+1. `20260524040407_create_inventory_reservation_system.sql` *(Schema, indices, seed data)*.
+2. `20260524050500_strict_confirm_and_idempotency.sql` *(Strict expiration check & idempotency table)*.
+3. `20260524052800_fix_rpc_security.sql` *(Security Definer rules bypass)*.
+
+### 3. Run the Clean Server
+```bash
+npm install
+npm run dev
+```
+Open [http://localhost:3000](http://localhost:3000) to view the storefront!
