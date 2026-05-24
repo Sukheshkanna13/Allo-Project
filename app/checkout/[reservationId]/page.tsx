@@ -127,11 +127,13 @@ export default function CheckoutPage({
 
     setSubmitting(true);
     try {
-      const res = await fetch('/api/checkout', {
+      const res = await fetch(`/api/reservations/${params.reservationId}/confirm`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          'Idempotency-Key': crypto.randomUUID()
+        },
         body: JSON.stringify({
-          reservation_id: params.reservationId,
           session_id: getSessionId(),
           customer_email: email,
         }),

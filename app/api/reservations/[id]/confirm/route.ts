@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createServerClient } from '@/lib/supabase';
+import { sendOrderConfirmationEmail } from '@/lib/email';
 
 interface ReservationWithProduct {
   id: string;
@@ -16,16 +17,34 @@ interface ReservationWithProduct {
   } | null;
 }
 
-export async function POST(req: NextRequest) {
+export async function POST(
+  req: NextRequest,
+  { params }: { params: { id: string } }
+) {
   const supabase = createServerClient();
+  const idempotencyKey = req.headers.get('Idempotency-Key');
+  const reservation_id = params.id;
+  
   const body = await req.json();
-  const { reservation_id, session_id, customer_email } = body;
+  const { session_id, customer_email } = body;
 
   if (!reservation_id || !session_id || !customer_email) {
     return NextResponse.json({ error: 'missing_fields' }, { status: 400 });
   }
 
-  // Fetch reservation with product
+  // Idempotency check
+  if (idempotencyKey) {
+    const { data: cached } = await supabase
+      .from('idempotency_keys')
+      .select('response')
+      .eq('key', idempotencyKey)
+      .maybeSingle();
+
+    if (cached) {
+      return NextResponse.json(cached.response.body, { status: cached.response.status });
+    }
+  }
+
   const { data: reservation, error: fetchError } = await supabase
     .from('reservations')
     .select('*, product:products(*)')
@@ -47,33 +66,24 @@ export async function POST(req: NextRequest) {
 
   const typedReservation = reservation as ReservationWithProduct;
 
-  // Check expiration
-  if (new Date(typedReservation.expires_at) < new Date()) {
-    await supabase.rpc('release_reservation', {
-      p_reservation_id: reservation_id,
-      p_new_status: 'expired',
-    });
-    return NextResponse.json({ error: 'reservation_expired' }, { status: 410 });
-  }
-
-  // Parse price (may be string from numeric column)
   const priceNum = typeof typedReservation.product?.price === 'string'
     ? parseFloat(typedReservation.product.price)
     : (typedReservation.product?.price ?? 0);
 
   const total_price = priceNum * typedReservation.quantity;
 
-  // Confirm reservation (atomically reduces total_qty)
   const { error: releaseError } = await supabase.rpc('release_reservation', {
     p_reservation_id: reservation_id,
     p_new_status: 'confirmed',
   });
 
   if (releaseError) {
+    if (releaseError.message.includes('reservation_expired')) {
+      return NextResponse.json({ error: 'reservation_expired' }, { status: 410 });
+    }
     return NextResponse.json({ error: releaseError.message }, { status: 500 });
   }
 
-  // Create order record
   const { data: order, error: orderError } = await supabase
     .from('orders')
     .insert({
@@ -93,5 +103,24 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: orderError.message }, { status: 500 });
   }
 
-  return NextResponse.json({ order }, { status: 201 });
+  // Fire email asynchronously
+  void sendOrderConfirmationEmail({
+    orderId: order.id,
+    customerEmail: customer_email,
+    productName: typedReservation.product?.name ?? 'Unknown Product',
+    quantity: typedReservation.quantity,
+    totalPrice: total_price,
+  });
+
+  const responseBody = { order };
+  const responseStatus = 201;
+
+  if (idempotencyKey) {
+    await supabase.from('idempotency_keys').insert({
+      key: idempotencyKey,
+      response: { body: responseBody, status: responseStatus }
+    });
+  }
+
+  return NextResponse.json(responseBody, { status: responseStatus });
 }

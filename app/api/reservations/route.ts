@@ -3,6 +3,7 @@ import { createServerClient } from '@/lib/supabase';
 
 export async function POST(req: NextRequest) {
   const supabase = createServerClient();
+  const idempotencyKey = req.headers.get('Idempotency-Key');
   const body = await req.json();
   const { session_id, product_id, warehouse_id, quantity } = body;
 
@@ -12,6 +13,18 @@ export async function POST(req: NextRequest) {
 
   if (quantity < 1 || quantity > 10) {
     return NextResponse.json({ error: 'invalid_quantity' }, { status: 400 });
+  }
+
+  if (idempotencyKey) {
+    const { data: cached } = await supabase
+      .from('idempotency_keys')
+      .select('response')
+      .eq('key', idempotencyKey)
+      .maybeSingle();
+
+    if (cached) {
+      return NextResponse.json(cached.response.body, { status: cached.response.status });
+    }
   }
 
   await supabase.rpc('expire_reservations');
@@ -25,13 +38,23 @@ export async function POST(req: NextRequest) {
 
   if (error) {
     const msg = error.message ?? '';
+    let status = 500;
+    let errCode = msg;
     if (msg.includes('insufficient_stock')) {
-      return NextResponse.json({ error: 'insufficient_stock' }, { status: 409 });
+      errCode = 'insufficient_stock';
+      status = 409;
+    } else if (msg.includes('inventory_not_found')) {
+      errCode = 'inventory_not_found';
+      status = 404;
     }
-    if (msg.includes('inventory_not_found')) {
-      return NextResponse.json({ error: 'inventory_not_found' }, { status: 404 });
+    
+    if (idempotencyKey) {
+      await supabase.from('idempotency_keys').insert({
+        key: idempotencyKey,
+        response: { body: { error: errCode }, status }
+      });
     }
-    return NextResponse.json({ error: msg }, { status: 500 });
+    return NextResponse.json({ error: errCode }, { status });
   }
 
   const { data: reservation } = await supabase
@@ -40,7 +63,15 @@ export async function POST(req: NextRequest) {
     .eq('id', data as string)
     .maybeSingle();
 
-  return NextResponse.json({ reservation_id: data, reservation }, { status: 201 });
+  const responseBody = { reservation_id: data, reservation };
+  if (idempotencyKey) {
+    await supabase.from('idempotency_keys').insert({
+      key: idempotencyKey,
+      response: { body: responseBody, status: 201 }
+    });
+  }
+
+  return NextResponse.json(responseBody, { status: 201 });
 }
 
 export async function GET(req: NextRequest) {

@@ -166,7 +166,10 @@ function ProductCard({ product, onReserved, index }: ProductCardProps) {
       const session_id = getSessionId();
       const res = await fetch('/api/reservations', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          'Idempotency-Key': crypto.randomUUID()
+        },
         body: JSON.stringify({
           session_id,
           product_id: product.id,
